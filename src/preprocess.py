@@ -30,6 +30,11 @@ def get_train_test(args):
 
     data['test'] = data['session_id'].isin(test_session['session_id'])
     data['target'] = get_sessiontarget(data, cart_log, master_cheese)
+    data.loc[data['test']==True, 'target'] = -1
+
+    #targetのlag特徴量
+    data = data.sort_values('start_at__date')
+    data['lag_target'] = data.groupby('user_id').target.shift(1)
 
     data = preprocess_datetime(data)
 
@@ -57,7 +62,7 @@ def get_train_test(args):
 
     data['distance_to_the_store'] = data['distance_to_the_store'].astype(np.float16)
 
-    train = data[data['test']==False].drop(['session_id', 'user_id', 'test'], axis=1).reset_index(drop=True)
-    test = data[data['test']==True].drop(['session_id', 'user_id', 'test'], axis=1).reset_index(drop=True)
+    train = data[data['test']==False].drop(['session_id', 'test'], axis=1).reset_index(drop=True)
+    test = data[data['test']==True].drop(['session_id', 'test'], axis=1).reset_index(drop=True)
     return train, test
 

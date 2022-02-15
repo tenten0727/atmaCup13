@@ -95,7 +95,7 @@ def run():
                 train_set = train_dataset, 
                 valid_sets = [train_dataset, valid_dataset], 
                 verbose_eval=50,
-                early_stopping_rounds=30,
+                early_stopping_rounds=50,
             )
             joblib.dump(model, args.save_name+f'/lgbm_seed{args.seed}_{fold}.pkl')
             preds = model.predict(train.loc[val_ind, features])
