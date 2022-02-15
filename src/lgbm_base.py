@@ -55,7 +55,9 @@ assert args.cv_method in {"group", "stratified", "time", "group_time"}, "unknown
 
 print("Read data.")
 # assert data.isnull().any().sum() == 0, "null exists."
-train, test = get_train_test(args)
+data = get_train_test(args)
+train = data[data['test']==False].drop(['session_id', 'test'], axis=1).reset_index(drop=True)
+test = data[data['test']==True].drop(['session_id', 'test'], axis=1).reset_index(drop=True)
 cat_features = ['sex', 'age']
 # print('cat_feature: ', cat_features)
 features = train.drop(['target'], axis=1).columns.tolist()

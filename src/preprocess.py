@@ -34,8 +34,8 @@ def get_train_test(args):
 
     #targetのlag特徴量
     data = data.sort_values('start_at__date')
-    data['lag_target'] = data.groupby('user_id').target.shift(1)
-
+    # data['lag_target'] = data.groupby('user_id').target.shift(1)
+    
     data = preprocess_datetime(data)
 
     data.loc[data['distance_to_the_store']=='不明', 'distance_to_the_store'] = np.nan
@@ -62,7 +62,5 @@ def get_train_test(args):
 
     data['distance_to_the_store'] = data['distance_to_the_store'].astype(np.float16)
 
-    train = data[data['test']==False].drop(['session_id', 'test'], axis=1).reset_index(drop=True)
-    test = data[data['test']==True].drop(['session_id', 'test'], axis=1).reset_index(drop=True)
-    return train, test
+    return data
 
