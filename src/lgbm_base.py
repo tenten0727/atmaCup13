@@ -58,8 +58,7 @@ print("Read data.")
 data = get_train_test(args)
 train = data[data['test']==False].drop(['session_id', 'test'], axis=1).reset_index(drop=True)
 test = data[data['test']==True].drop(['session_id', 'test'], axis=1).reset_index(drop=True)
-cat_features = ['sex', 'age']
-# print('cat_feature: ', cat_features)
+
 features = train.drop(['target'], axis=1).columns.tolist()
 print('feature: ', features)
 
