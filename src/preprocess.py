@@ -28,10 +28,15 @@ def cart_log_feature(data, cart_log, master, master_cheese):
     train_cheese = before_180_cart_log.loc[cart_log['JAN'].isin(master_cheese['JAN'].unique())]['session_id']
     data['buy_cheese_already'] = data['session_id'].isin(train_cheese).astype(np.int8)
 
+    dairy_products_master = master[master['department']=='乳製品'].JAN
+    before_180_cart_log['dairy_products'] = before_180_cart_log['JAN'].isin(dairy_products_master).astype(np.int8)
+    data['buy_dairy_products'] = data['session_id'].map(before_180_cart_log.groupby('session_id')['dairy_products'].sum())
+
     agg_dict = {
         'n_items': 'sum',
         'coupon_is_activated': 'sum',
         'duration': ['min', 'max'],
+        'item_detail': pd.Series.nunique,
     }
     cart_info = before_180_cart_log.groupby('session_id').agg(agg_dict)
     cart_info.columns = ['cart_'+'_'.join(col) for col in cart_info.columns]
@@ -100,4 +105,5 @@ def get_train_test(args):
 if __name__ == '__main__':
     data = get_train_test(-1)
     print(data.head())
+    print(data.columns)
     print(data.shape)
