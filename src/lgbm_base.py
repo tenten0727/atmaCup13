@@ -14,6 +14,8 @@ from collections import defaultdict
 import argparse
 import datetime as dt
 import mlflow
+import sweetviz as sv
+import seaborn as sns
 
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
@@ -56,11 +58,15 @@ assert args.cv_method in {"group", "stratified", "time", "group_time"}, "unknown
 print("Read data.")
 # assert data.isnull().any().sum() == 0, "null exists."
 data = get_train_test(args)
-train = data[data['test']==False].drop(['session_id', 'test'], axis=1).reset_index(drop=True)
-test = data[data['test']==True].drop(['session_id', 'test'], axis=1).reset_index(drop=True)
+group_feature = data.loc[data['test']==False, 'start_at__date']
 
+train = data[data['test']==False].drop(['session_id', 'test', 'user_id', 'registor_number', 'start_at__date'], axis=1).reset_index(drop=True)
+test = data[data['test']==True].drop(['session_id', 'test', 'user_id', 'registor_number', 'start_at__date'], axis=1).reset_index(drop=True)
 features = train.drop(['target'], axis=1).columns.tolist()
 print('feature: ', features)
+
+report = sv.compare([train.drop('target', axis=1), "train"], [test.drop('target', axis=1), "test"])
+report.show_html(os.path.join('../save', "train_vs_test.html"))
 
 def run():    
     # hyperparams from: https://www.kaggle.com/valleyzw/ubiquant-lgbm-optimization
@@ -74,10 +80,10 @@ def run():
         'seed': args.seed,
         # 'lambda_l1': 6.610898817934583, 
         # 'lambda_l2': 1.2572931636397838e-07, 
-        # 'num_leaves': 122, 
+        # 'num_leaves': 31, 
         'feature_fraction': 0.9, 
         'bagging_fraction': 0.9, 
-        'bagging_freq': 6, 
+        'bagging_freq': 3, 
         'max_depth': 5, 
         # 'max_bin': 214, 
         # 'min_data_in_leaf': 450,
@@ -105,7 +111,7 @@ def run():
             gc.collect()
             
     if args.cv_method=="stratified":
-        stkf = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=55)
+        stkf = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=args.seed)
         for fold, (trn_ind, val_ind) in enumerate(stkf.split(train[features], y)):
             print(f"=====================fold: {fold}=====================")
             print(f"train length: {len(trn_ind)}, valid length: {len(val_ind)}")
@@ -119,7 +125,7 @@ def run():
     elif args.cv_method=="group":
         # https://www.kaggle.com/lucamassaron/eda-target-analysis/notebook
         kfold = GroupKFold(args.folds)
-        for fold, (trn_ind, val_ind) in enumerate(kfold.split(train[features], y, train.time_id)):
+        for fold, (trn_ind, val_ind) in enumerate(kfold.split(train[features], y, group_feature)):
             print(f"=====================fold: {fold}=====================")
             print(f"train length: {len(trn_ind)}, valid length: {len(val_ind)}")
             run_single_fold(fold, trn_ind, val_ind)
@@ -137,7 +143,7 @@ with mlflow.start_run(experiment_id=EXPERIMENT_ID):
 
     print(f"lgbm {args.cv_method} {args.folds} auc: {auc(fpr, tpr):.4f}")
     mlflow.log_metric('folds_auc', auc(fpr, tpr))
-    del df, train
+    del df
     gc.collect()
 
     models = [joblib.load(args.save_name+f'/lgbm_seed{args.seed}_{fold}.pkl') for fold in range(args.folds)]
@@ -146,3 +152,8 @@ with mlflow.start_run(experiment_id=EXPERIMENT_ID):
     submit_df['target'] = np.mean(np.stack([models[fold].predict(test[features]) for fold in range(args.folds)]), axis=0)
     
     submit_df.to_csv(args.save_name+'/submit.csv', index=False)
+
+sns.distplot(train['preds'], label='oof')
+sns.distplot(submit_df['target'], label='Test')
+
+plt.savefig(args.save_name+'/oof_test_distplot.png')

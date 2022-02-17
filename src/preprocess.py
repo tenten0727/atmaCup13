@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import os
 from sklearn.model_selection import KFold
-
+import sweetviz as sv
 
 DATA_PATH = '../input/'
 
@@ -16,31 +16,47 @@ def get_sessiontarget(df, cartlog, master_cheese):
 def preprocess_datetime(data):
     data['start_at__date'] = pd.to_datetime(data['start_at__date'])
     # data['year'] = data['start_at__date'].dt.year.astype(np.float16)
-    data['month'] = data['start_at__date'].dt.month.astype('category')
-    data['day'] = data['start_at__date'].dt.day.astype('category')
+    # data['month'] = data['start_at__date'].dt.month.astype(np.int16)
+    # data['day'] = data['start_at__date'].dt.day.astype(np.int16)
     data['week'] = data['start_at__date'].dt.dayofweek.astype('category')
-    data = data.drop('start_at__date', axis=1)
+    # data = data.drop('start_at__date', axis=1)
 
     return data
 
 def cart_log_feature(data, cart_log, master, master_cheese):
-    before_180_cart_log = cart_log[cart_log['duration'] < 180]
-    train_cheese = before_180_cart_log.loc[cart_log['JAN'].isin(master_cheese['JAN'].unique())]['session_id']
-    data['buy_cheese_already'] = data['session_id'].isin(train_cheese).astype(np.int8)
-
-    dairy_products_master = master[master['department']=='乳製品'].JAN
-    before_180_cart_log['dairy_products'] = before_180_cart_log['JAN'].isin(dairy_products_master).astype(np.int8)
-    data['buy_dairy_products'] = data['session_id'].map(before_180_cart_log.groupby('session_id')['dairy_products'].sum())
+    idx_before_180 = cart_log['duration'] < 180
+    before_180_cart_log = cart_log[idx_before_180]
 
     agg_dict = {
         'n_items': 'sum',
         'coupon_is_activated': 'sum',
         'duration': ['min', 'max'],
-        'item_detail': pd.Series.nunique,
+        'JAN': pd.Series.nunique,
     }
-    cart_info = before_180_cart_log.groupby('session_id').agg(agg_dict)
-    cart_info.columns = ['cart_'+'_'.join(col) for col in cart_info.columns]
-    data = pd.merge(data, cart_info, how='left', on='session_id')
+    before_180_cart_feature = before_180_cart_log.groupby('session_id').agg(agg_dict)
+    before_180_cart_feature.columns = ['cart_'+'_'.join(col) for col in before_180_cart_feature.columns]
+    data = pd.merge(data, before_180_cart_feature, how='left', on='session_id')
+    return data
+
+def user_cart_feature(data, cart_log, master, master_cheese):
+    cart_log = pd.merge(cart_log, data[['session_id', 'user_id']], how='left', on='session_id')
+    idx_train = cart_log['session_id'].isin(data[data['test']==False].session_id)
+    idx_not_target = ~cart_log['JAN'].isin(master_cheese['JAN'].unique())
+    cart_log = cart_log[idx_not_target & idx_train]
+
+    agg_dict = {
+        'n_items': 'sum',
+        'coupon_is_activated': 'sum',
+        'duration': ['min', 'max'],
+        'JAN': pd.Series.nunique,
+        'created_at__hour': ['min', 'max', 'median'],
+        'created_at__date': pd.Series.nunique,
+    }
+
+    cart_user_feature = cart_log.groupby('user_id').agg(agg_dict)
+    cart_user_feature.columns = ['user_'+'_'.join(col) for col in cart_user_feature.columns]
+    data = pd.merge(data, cart_user_feature, how='left', on='user_id')
+
     return data
 
 def get_train_test(args):
@@ -59,7 +75,8 @@ def get_train_test(args):
     # data['lag_target'] = data.groupby('user_id').target.shift(1)
     
     data = preprocess_datetime(data)
-    data = cart_log_feature(data, cart_log, master, master_cheese)
+    # data = cart_log_feature(data, cart_log, master, master_cheese)
+    data = user_cart_feature(data, cart_log, master, master_cheese)
 
     data.loc[data['distance_to_the_store']=='不明', 'distance_to_the_store'] = np.nan
     data['distance_to_the_store'] = data['distance_to_the_store'].fillna(-1)
@@ -107,3 +124,6 @@ if __name__ == '__main__':
     print(data.head())
     print(data.columns)
     print(data.shape)
+    data['target'] = data['target'].astype(bool)
+    report = sv.compare([data[data['test']==False].drop(['session_id', 'test', 'start_at__date'], axis=1).reset_index(drop=True), "train"], [data[data['test']==True].drop(['session_id', 'test', 'start_at__date'], axis=1).reset_index(drop=True), "test"])
+    report.show_html(os.path.join('../save', "train_vs_test.html"))
