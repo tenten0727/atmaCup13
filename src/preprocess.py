@@ -26,12 +26,16 @@ def preprocess_datetime(data):
 def cart_log_feature(data, cart_log, master, master_cheese):
     idx_before_180 = cart_log['duration'] < 180
     before_180_cart_log = cart_log[idx_before_180]
+    price = pd.read_csv(os.path.join(DATA_PATH, "price.csv"))
+    JAN2price = dict(zip(price['JAN'], price['avg_price']))
+    before_180_cart_log['price'] = before_180_cart_log['JAN'].map(JAN2price) * before_180_cart_log['n_items']
 
     agg_dict = {
         'n_items': 'sum',
-        'coupon_is_activated': 'sum',
-        'duration': ['min', 'max'],
-        'JAN': pd.Series.nunique,
+        # 'coupon_is_activated': 'sum',
+        # 'duration': ['min', 'max'],
+        'JAN': ['count', pd.Series.nunique],
+        # 'price': ['min', 'max', np.nanmean, np.nanstd]
     }
     before_180_cart_feature = before_180_cart_log.groupby('session_id').agg(agg_dict)
     before_180_cart_feature.columns = ['cart_'+'_'.join(col) for col in before_180_cart_feature.columns]
@@ -43,20 +47,67 @@ def user_cart_feature(data, cart_log, master, master_cheese):
     idx_train = cart_log['session_id'].isin(data[data['test']==False].session_id)
     idx_not_target = ~cart_log['JAN'].isin(master_cheese['JAN'].unique())
     cart_log = cart_log[idx_not_target & idx_train]
+    cart_log = department_feature(data, cart_log, master, master_cheese)
+    price = pd.read_csv(os.path.join(DATA_PATH, "price.csv"))
+    JAN2price = dict(zip(price['JAN'], price['avg_price']))
+    cart_log['price'] = cart_log['JAN'].map(JAN2price) * cart_log['n_items']
 
     agg_dict = {
         'n_items': 'sum',
         'coupon_is_activated': 'sum',
         'duration': ['min', 'max'],
-        'JAN': pd.Series.nunique,
+        # 'JAN': pd.Series.nunique,
         'created_at__hour': ['min', 'max', 'median'],
         'created_at__date': pd.Series.nunique,
+        'lift_target': ['min', 'max', np.nanmean, np.nanstd],
+        # 'lift_top10': 'sum',
+        'price': ['min', 'max', np.nanstd, np.nanmean],
     }
 
     cart_user_feature = cart_log.groupby('user_id').agg(agg_dict)
     cart_user_feature.columns = ['user_'+'_'.join(col) for col in cart_user_feature.columns]
     data = pd.merge(data, cart_user_feature, how='left', on='user_id')
+    # for col in data.filter(like='user_', axis=0):
+    #     data[col] = data[col].fillna(data[col].mean())
+    
+    return data
 
+def department_feature(data, cart_log, master, master_cheese):
+    jan2department = dict(zip(master['JAN'], master['department']))
+    # not_target_log = cart_log[~cart_log['JAN'].isin(master_cheese['JAN'].unique())]
+    log_category = cart_log['JAN'].map(jan2department)
+    
+    use_department = log_category.value_counts()
+    idx = log_category.isin(use_department.index)
+    _piv = pd.pivot_table(data=cart_log[idx],
+                        index="session_id",
+                        columns=log_category[idx], 
+                        aggfunc="sum",
+                        values="n_items")
+    _piv = _piv.fillna(0).astype(int)
+    target_columns = _piv.columns.tolist()
+
+    same_session_department_df = pd.merge(
+        data, 
+        _piv, on='session_id', 
+        how="left"
+    ).groupby("target")[target_columns]\
+    .mean()\
+    .T
+    same_session_department_df["difference"] = same_session_department_df[1] - same_session_department_df[0]
+    same_session_department_df["difference_ratio"] = same_session_department_df["difference"] / same_session_department_df[0]
+    same_session_department_df = same_session_department_df.sort_values(1, ascending=False)
+    same_session_department_df['diff_top10'] = same_session_department_df.index.isin(same_session_department_df.tail(10).index)
+
+    cart_log['department'] = cart_log['JAN'].map(jan2department)
+    dapa2lift = dict(zip(same_session_department_df.index, same_session_department_df['difference']))
+    cart_log['lift_target'] = cart_log['department'].map(dapa2lift)
+    # dapa2lift = dict(zip(same_session_department_df.index, same_session_department_df['diff_top10']))
+    # cart_log['lift_top10'] = cart_log['department'].map(dapa2lift)
+    
+    return cart_log
+
+def dijkstra(data, cart_log, master, master_cheese):
     return data
 
 def get_train_test(args):
@@ -75,7 +126,7 @@ def get_train_test(args):
     # data['lag_target'] = data.groupby('user_id').target.shift(1)
     
     data = preprocess_datetime(data)
-    # data = cart_log_feature(data, cart_log, master, master_cheese)
+    data = cart_log_feature(data, cart_log, master, master_cheese)
     data = user_cart_feature(data, cart_log, master, master_cheese)
 
     data.loc[data['distance_to_the_store']=='不明', 'distance_to_the_store'] = np.nan
@@ -96,7 +147,7 @@ def get_train_test(args):
     data['age'] = data['age'].fillna(-1).astype(np.float16)
 
     # target_enc 効かなかった。。。
-    # TE_col = ['sex', 'age']
+    # TE_col = ['week']
     # for col in TE_col:
     #     tmp = np.repeat(np.nan, data.shape[0])
 

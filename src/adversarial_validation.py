@@ -35,7 +35,7 @@ pd.set_option('max_columns', 64)
 
 SAVE_PATH = '../save/'
 DATA_PATH = '../input/'
-EXPERIMENT_ID = 0
+EXPERIMENT_ID = 1
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--debug', action='store_true')
@@ -60,13 +60,12 @@ print("Read data.")
 data = get_train_test(args)
 group_feature = data.loc[data['test']==False, 'start_at__date']
 
-train = data[data['test']==False].drop(['session_id', 'test', 'user_id', 'registor_number', 'start_at__date'], axis=1).reset_index(drop=True)
-test = data[data['test']==True].drop(['session_id', 'test', 'user_id', 'registor_number', 'start_at__date'], axis=1).reset_index(drop=True)
-features = train.drop(['target'], axis=1).columns.tolist()
+train = data
+features = train.drop(['target', 'test', 'session_id', 'user_id', 'registor_number', 'start_at__date'], axis=1).columns.tolist()
 print('feature: ', features)
 
-report = sv.compare([train.drop('target', axis=1), "train"], [test.drop('target', axis=1), "test"])
-report.show_html(os.path.join('../save', "train_vs_test.html"))
+# report = sv.compare([train.drop('target', axis=1), "train"], [test.drop('target', axis=1), "test"])
+# report.show_html(os.path.join('../save', "train_vs_test.html"))
 
 def run():    
     # hyperparams from: https://www.kaggle.com/valleyzw/ubiquant-lgbm-optimization
@@ -90,7 +89,7 @@ def run():
         'n_estimators': args.n_estimators, 
     }
     
-    y = train['target']
+    y = train['test']
     train['preds'] = -1000
     
     def run_single_fold(fold, trn_ind, val_ind):
@@ -138,22 +137,22 @@ mlflow.lightgbm.autolog()
 with mlflow.start_run(experiment_id=EXPERIMENT_ID):
     mlflow.log_params(vars(args))
     run()
-    df = train[["target", "preds"]].query("preds!=-1000")
-    fpr, tpr, thresholds = roc_curve(df.target, df.preds)
+    # df = train[["target", "preds"]].query("preds!=-1000")
+    # fpr, tpr, thresholds = roc_curve(df.target, df.preds)
 
-    print(f"lgbm {args.cv_method} {args.folds} auc: {auc(fpr, tpr):.4f}")
-    mlflow.log_metric('folds_auc', auc(fpr, tpr))
-    del df
-    gc.collect()
+    # print(f"lgbm {args.cv_method} {args.folds} auc: {auc(fpr, tpr):.4f}")
+    # mlflow.log_metric('folds_auc', auc(fpr, tpr))
+    # del df
+    # gc.collect()
 
-    models = [joblib.load(args.save_name+f'/lgbm_seed{args.seed}_{fold}.pkl') for fold in range(args.folds)]
+#     models = [joblib.load(args.save_name+f'/lgbm_seed{args.seed}_{fold}.pkl') for fold in range(args.folds)]
 
-    submit_df = pd.read_csv(DATA_PATH+'/atmaCup13_sample_submission.csv')
-    submit_df['target'] = np.mean(np.stack([models[fold].predict(test[features]) for fold in range(args.folds)]), axis=0)
+#     submit_df = pd.read_csv(DATA_PATH+'/atmaCup13_sample_submission.csv')
+#     submit_df['target'] = np.mean(np.stack([models[fold].predict(test[features]) for fold in range(args.folds)]), axis=0)
     
-    submit_df.to_csv(args.save_name+f'/submit{args.seed}.csv', index=False)
+#     submit_df.to_csv(args.save_name+'/submit.csv', index=False)
 
-sns.distplot(train['preds'], label='oof')
-sns.distplot(submit_df['target'], label='Test')
+# sns.distplot(train['preds'], label='oof')
+# sns.distplot(submit_df['target'], label='Test')
 
-plt.savefig(args.save_name+'/oof_test_distplot.png')
+# plt.savefig(args.save_name+'/oof_test_distplot.png')
