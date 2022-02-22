@@ -1,11 +1,46 @@
 import datetime as dt
+import pickle
 import numpy as np
 import pandas as pd
 import os
 from sklearn.model_selection import KFold
 import sweetviz as sv
+from datetime import datetime, date, timedelta
+import calendar
+import jpholiday
+from gensim.models import word2vec, KeyedVectors
+import multiprocessing
 
 DATA_PATH = '../input/'
+
+def word2vec_vectorizer(input_df, col, replace=True):
+    path_name = f'word2vec_{col}.wordvectors'
+    if replace or os.path.exists(path_name):
+        model = word2vec.Word2Vec(
+            sentences=input_df[col].tolist(),
+            vector_size=32,
+            min_count=1,
+            window=5,
+            sg=1, # skip-gramモデルを使用するか(0: しない, 1: する)
+            hs=1, # 頻出単語をはじくか(0: はじく, 1: はじかない)
+            epochs=5,
+            workers=multiprocessing.cpu_count(),
+        )
+        model.wv.save(path_name)
+    model = KeyedVectors.load(path_name)
+    vectors = input_df[col].apply(lambda x: np.mean([model[e] for e in x], axis=0))
+    return vectors
+
+def get_item2vec(cart_log):
+    cart_log = cart_log[cart_log['action_name']=='買物']
+    grp_df = cart_log.groupby("session_id")["item_detail_add_1"].apply(list).to_frame()
+    train_vectors = word2vec_vectorizer(grp_df, 'item_detail_add_1')
+    model = KeyedVectors.load('word2vec_item_detail_add_1.wordvectors')
+    item2vec = {item: model[item] for item in cart_log['item_detail_add_1'].unique()}
+    item2vec_df = pd.DataFrame(item2vec).T
+    item2vec_df.columns = ['WE_'+str(col) for col in item2vec_df.columns]
+
+    return item2vec_df
 
 def get_sessiontarget(df, cartlog, master_cheese):
     cartlog['target'] = 0
@@ -19,56 +54,72 @@ def preprocess_datetime(data):
     # data['month'] = data['start_at__date'].dt.month.astype(np.int16)
     # data['day'] = data['start_at__date'].dt.day.astype(np.int16)
     data['week'] = data['start_at__date'].dt.dayofweek.astype('category')
+    data['holiday'] = data['start_at__date'].map(jpholiday.is_holiday).astype(int)
+
     # data = data.drop('start_at__date', axis=1)
 
     return data
 
-def cart_log_feature(data, cart_log, master, master_cheese):
+def cart_log_feature(data, cart_log, master, master_cheese, item2vec):
     idx_before_180 = cart_log['duration'] < 180
+
     before_180_cart_log = cart_log[idx_before_180]
     price = pd.read_csv(os.path.join(DATA_PATH, "price.csv"))
     JAN2price = dict(zip(price['JAN'], price['avg_price']))
     before_180_cart_log['price'] = before_180_cart_log['JAN'].map(JAN2price) * before_180_cart_log['n_items']
+    before_180_cart_log = pd.merge(before_180_cart_log, item2vec, how='left', on='item_detail_add_1')
 
     agg_dict = {
         'n_items': 'sum',
         # 'coupon_is_activated': 'sum',
-        # 'duration': ['min', 'max'],
+        'duration': ['min', 'max'],
         'JAN': ['count', pd.Series.nunique],
-        # 'price': ['min', 'max', np.nanmean, np.nanstd]
+        'price': np.nanmean
     }
+    # for i in range(31):
+    #     agg_dict['WE_'+str(i)] = [np.nanmean, np.std]
+    
     before_180_cart_feature = before_180_cart_log.groupby('session_id').agg(agg_dict)
     before_180_cart_feature.columns = ['cart_'+'_'.join(col) for col in before_180_cart_feature.columns]
     data = pd.merge(data, before_180_cart_feature, how='left', on='session_id')
     return data
 
-def user_cart_feature(data, cart_log, master, master_cheese):
+def user_cart_feature(data, cart_log, master, master_cheese, item2vec):
     cart_log = pd.merge(cart_log, data[['session_id', 'user_id']], how='left', on='session_id')
     idx_train = cart_log['session_id'].isin(data[data['test']==False].session_id)
     idx_not_target = ~cart_log['JAN'].isin(master_cheese['JAN'].unique())
     cart_log = cart_log[idx_not_target & idx_train]
     cart_log = department_feature(data, cart_log, master, master_cheese)
+
     price = pd.read_csv(os.path.join(DATA_PATH, "price.csv"))
     JAN2price = dict(zip(price['JAN'], price['avg_price']))
     cart_log['price'] = cart_log['JAN'].map(JAN2price) * cart_log['n_items']
 
+    cart_log = pd.merge(cart_log, item2vec, how='left', on='item_detail_add_1')
+
+    cart_log['diff_duration'] = cart_log['duration'] - cart_log.groupby('session_id')['duration'].shift(1)
     agg_dict = {
         'n_items': 'sum',
-        'coupon_is_activated': 'sum',
+        # 'coupon_is_activated': 'sum',
         'duration': ['min', 'max'],
+        'diff_duration': [np.nanmean, np.nanstd],
         # 'JAN': pd.Series.nunique,
         'created_at__hour': ['min', 'max', 'median'],
         'created_at__date': pd.Series.nunique,
-        'lift_target': ['min', 'max', np.nanmean, np.nanstd],
+        # 'lift_target': ['min', 'max', np.nanmean, np.nanstd],
         # 'lift_top10': 'sum',
-        'price': ['min', 'max', np.nanstd, np.nanmean],
+        # 'price': ['min', 'max', np.nanstd, np.nanmean],
     }
+
+    for i in range(31):
+        agg_dict['WE_'+str(i)] = [np.nanmean, np.std]
 
     cart_user_feature = cart_log.groupby('user_id').agg(agg_dict)
     cart_user_feature.columns = ['user_'+'_'.join(col) for col in cart_user_feature.columns]
     data = pd.merge(data, cart_user_feature, how='left', on='user_id')
     # for col in data.filter(like='user_', axis=0):
     #     data[col] = data[col].fillna(data[col].mean())
+    # data['price_ratio'] = data['user_price_nanmean'] / data['cart_price_nanmean']
     
     return data
 
@@ -110,6 +161,7 @@ def department_feature(data, cart_log, master, master_cheese):
 def dijkstra(data, cart_log, master, master_cheese):
     return data
 
+
 def get_train_test(args):
     data = pd.read_csv(os.path.join(DATA_PATH, "session.csv"))
     test_session = pd.read_csv(os.path.join(DATA_PATH, "test_session.csv"))
@@ -124,10 +176,15 @@ def get_train_test(args):
     #targetのlag特徴量
     # data = data.sort_values('start_at__date').reset_index(drop=True)
     # data['lag_target'] = data.groupby('user_id').target.shift(1)
+
+    cart_log['item_detail_add_1'] = cart_log['item_detail_add_1'].fillna('欠損商品')
+    # item2vec = get_item2vec(cart_log)
+    item2vec = pickle.load(open('../save/item2vec.pkl', 'rb'))
+    # print(item2vec.head())
     
     data = preprocess_datetime(data)
-    data = cart_log_feature(data, cart_log, master, master_cheese)
-    data = user_cart_feature(data, cart_log, master, master_cheese)
+    data = cart_log_feature(data, cart_log, master, master_cheese, item2vec)
+    data = user_cart_feature(data, cart_log, master, master_cheese, item2vec)
 
     data.loc[data['distance_to_the_store']=='不明', 'distance_to_the_store'] = np.nan
     data['distance_to_the_store'] = data['distance_to_the_store'].fillna(-1)
@@ -147,18 +204,18 @@ def get_train_test(args):
     data['age'] = data['age'].fillna(-1).astype(np.float16)
 
     # target_enc 効かなかった。。。
-    # TE_col = ['week']
-    # for col in TE_col:
-    #     tmp = np.repeat(np.nan, data.shape[0])
+    TE_col = ['age', 'sex']
+    for col in TE_col:
+        tmp = np.repeat(np.nan, data.shape[0])
 
-    #     target_enc = data[data['test']==False].groupby(col)['target'].mean()
-    #     tmp[data['test']==True] = data.loc[data['test']==True, col].map(target_enc)
+        target_enc = data[data['test']==False].groupby(col)['target'].mean()
+        tmp[data['test']==True] = data.loc[data['test']==True, col].map(target_enc)
 
-    #     kf = KFold(n_splits=5, shuffle=True)
-    #     for trn, val in kf.split(data[data['test']==False]):
-    #         target_enc = data.iloc[trn].groupby(col)['target'].mean()
-    #         tmp[val] = data.loc[val, col].map(target_enc)
-    #     data['target_enc_'+col] = tmp
+        kf = KFold(n_splits=5, shuffle=True)
+        for trn, val in kf.split(data[data['test']==False]):
+            target_enc = data.iloc[trn].groupby(col)['target'].mean()
+            tmp[val] = data.loc[val, col].map(target_enc)
+        data['target_enc_'+col] = tmp
     
     data['registor_number'], _ = pd.factorize(data['registor_number'])
     data['registor_number'] = data['registor_number'].astype('category')
@@ -176,5 +233,5 @@ if __name__ == '__main__':
     print(data.columns)
     print(data.shape)
     data['target'] = data['target'].astype(bool)
-    report = sv.compare([data[data['test']==False].drop(['session_id', 'test', 'start_at__date'], axis=1).reset_index(drop=True), "train"], [data[data['test']==True].drop(['session_id', 'test', 'start_at__date'], axis=1).reset_index(drop=True), "test"])
-    report.show_html(os.path.join('../save', "train_vs_test.html"))
+    # report = sv.compare([data[data['test']==False].drop(['session_id', 'test', 'start_at__date'], axis=1).reset_index(drop=True), "train"], [data[data['test']==True].drop(['session_id', 'test', 'start_at__date'], axis=1).reset_index(drop=True), "test"])
+    # report.show_html(os.path.join('../save', "train_vs_test.html"))

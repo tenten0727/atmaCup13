@@ -19,8 +19,9 @@ import seaborn as sns
 
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
-from sklearn.model_selection import TimeSeriesSplit, StratifiedKFold, GroupKFold, train_test_split
+from sklearn.model_selection import TimeSeriesSplit, StratifiedKFold, GroupKFold, train_test_split 
 from sklearn.metrics import auc, roc_curve
+from collections import Counter, defaultdict
 
 import lightgbm as lgb
 
@@ -36,6 +37,50 @@ pd.set_option('max_columns', 64)
 SAVE_PATH = '../save/'
 DATA_PATH = '../input/'
 EXPERIMENT_ID = 0
+
+def stratified_group_k_fold(X, y, groups, k, seed=None):
+    labels_num = np.max(y) + 1
+    y_counts_per_group = defaultdict(lambda: np.zeros(labels_num))
+    y_distr = Counter()
+    for label, g in zip(y, groups):
+        y_counts_per_group[g][label] += 1
+        y_distr[label] += 1
+
+    y_counts_per_fold = defaultdict(lambda: np.zeros(labels_num))
+    groups_per_fold = defaultdict(set)
+
+    def eval_y_counts_per_fold(y_counts, fold):
+        y_counts_per_fold[fold] += y_counts
+        std_per_label = []
+        for label in range(labels_num):
+            label_std = np.std([y_counts_per_fold[i][label] / y_distr[label] for i in range(k)])
+            std_per_label.append(label_std)
+        y_counts_per_fold[fold] -= y_counts
+        return np.mean(std_per_label)
+    
+    groups_and_y_counts = list(y_counts_per_group.items())
+    random.Random(seed).shuffle(groups_and_y_counts)
+
+    for g, y_counts in sorted(groups_and_y_counts, key=lambda x: -np.std(x[1])):
+        best_fold = None
+        min_eval = None
+        for i in range(k):
+            fold_eval = eval_y_counts_per_fold(y_counts, i)
+            if min_eval is None or fold_eval < min_eval:
+                min_eval = fold_eval
+                best_fold = i
+        y_counts_per_fold[best_fold] += y_counts
+        groups_per_fold[best_fold].add(g)
+
+    all_groups = set(groups)
+    for i in range(k):
+        train_groups = all_groups - groups_per_fold[i]
+        test_groups = groups_per_fold[i]
+
+        train_indices = [i for i, g in enumerate(groups) if g in train_groups]
+        test_indices = [i for i, g in enumerate(groups) if g in test_groups]
+
+        yield train_indices, test_indices
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--debug', action='store_true')
@@ -53,20 +98,24 @@ if not os.path.isdir(args.save_name):
 if args.debug:
     setattr(args, 'folds', 2)
     setattr(args, 'n_estimators', 10)
-assert args.cv_method in {"group", "stratified", "time", "group_time"}, "unknown cv method"
+assert args.cv_method in {"group", "stratified", "time", "group_time", "stratified_group"}, "unknown cv method"
 
 print("Read data.")
 # assert data.isnull().any().sum() == 0, "null exists."
 data = get_train_test(args)
 group_feature = data.loc[data['test']==False, 'start_at__date']
 
-train = data[data['test']==False].drop(['session_id', 'test', 'user_id', 'registor_number', 'start_at__date'], axis=1).reset_index(drop=True)
-test = data[data['test']==True].drop(['session_id', 'test', 'user_id', 'registor_number', 'start_at__date'], axis=1).reset_index(drop=True)
-features = train.drop(['target'], axis=1).columns.tolist()
+train = data[data['test']==False].reset_index(drop=True)
+test = data[data['test']==True].reset_index(drop=True)
+if args.cv_method=="time":
+    train = data[data['test']==False].sort_values('start_at__date').reset_index(drop=True)
+    test = data[data['test']==True].sort_values('start_at__date').reset_index(drop=True)
+
+features = train.drop(['target', 'session_id', 'test', 'user_id', 'registor_number', 'start_at__date'], axis=1).columns.tolist()
 print('feature: ', features)
 
-report = sv.compare([train.drop('target', axis=1), "train"], [test.drop('target', axis=1), "test"])
-report.show_html(os.path.join('../save', "train_vs_test.html"))
+# report = sv.compare([train.drop('target', axis=1), "train"], [test.drop('target', axis=1), "test"])
+# report.show_html(os.path.join('../save', "train_vs_test.html"))
 
 def run():    
     # hyperparams from: https://www.kaggle.com/valleyzw/ubiquant-lgbm-optimization
@@ -88,10 +137,12 @@ def run():
         # 'max_bin': 214, 
         # 'min_data_in_leaf': 450,
         'n_estimators': args.n_estimators, 
+        # 'extra_trees': True,
     }
     
     y = train['target']
     train['preds'] = -1000
+    group_feature = train['start_at__date']
     
     def run_single_fold(fold, trn_ind, val_ind):
         with mlflow.start_run(experiment_id=EXPERIMENT_ID, nested=True):
@@ -123,9 +174,13 @@ def run():
             print(f"train length: {len(trn_ind)}, valid length: {len(val_ind)}")
             run_single_fold(fold, trn_ind, val_ind)
     elif args.cv_method=="group":
-        # https://www.kaggle.com/lucamassaron/eda-target-analysis/notebook
         kfold = GroupKFold(args.folds)
         for fold, (trn_ind, val_ind) in enumerate(kfold.split(train[features], y, group_feature)):
+            print(f"=====================fold: {fold}=====================")
+            print(f"train length: {len(trn_ind)}, valid length: {len(val_ind)}")
+            run_single_fold(fold, trn_ind, val_ind)
+    elif args.cv_method=="stratified_group":
+        for fold, (trn_ind, val_ind) in enumerate(stratified_group_k_fold(train[features], y, group_feature, args.folds, seed=args.seed)):
             print(f"=====================fold: {fold}=====================")
             print(f"train length: {len(trn_ind)}, valid length: {len(val_ind)}")
             run_single_fold(fold, trn_ind, val_ind)
